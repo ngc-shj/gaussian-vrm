@@ -5,6 +5,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TrackballControls } from 'three/addons/controls/TrackballControls.js';
+import { VRButton } from 'three/addons/webxr/VRButton.js';
 import { preprocess } from './apps/preprocess/preprocess.js';
 import { GVRM, GVRMUtils } from './gvrm-format/gvrm.js';
 import { FPSCounter } from './apps/fps.js';
@@ -342,6 +343,23 @@ document.getElementById('mobile-mode-button').addEventListener('click', function
 // Home button handler
 document.getElementById('home-button').addEventListener('click', function() {
   location.reload();
+});
+
+// VR button handler
+document.getElementById('vr-button').addEventListener('click', function() {
+  // Enable WebXR
+  renderer.xr.enabled = true;
+
+  // Adjust character position for VR (avatar belly is at origin)
+  // Move character to height 0.8 and 1m away from origin
+  if (gvrm && gvrm.character && gvrm.character.currentVrm) {
+    gvrm.character.currentVrm.scene.position.y = 0;
+    gvrm.character.currentVrm.scene.position.z = -0.5;
+  }
+
+  // Create and click the VR button
+  const vrButton = VRButton.createButton(renderer);
+  vrButton.click();
 });
 
 
