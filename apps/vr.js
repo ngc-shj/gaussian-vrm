@@ -94,13 +94,13 @@ export function setupVR(renderer, container, scene, gvrm, gvrmFiles, fbxFiles, c
   const controller1 = addController(1);
 
   // インタラクティブパネルの作成
-  const leftPanel = createInteractivePanel('Switch\nAvatar', '#ff4444');
+  // const leftPanel = createInteractivePanel('Switch\nAvatar', '#ff4444');
   const rightPanel = createInteractivePanel('Switch\nAnimation', '#4444ff');
 
-  leftPanel.name = 'switchAvatarPanel';
+  // leftPanel.name = 'switchAvatarPanel';
   rightPanel.name = 'switchAnimationPanel';
 
-  scene.add(leftPanel);
+  // scene.add(leftPanel);
   scene.add(rightPanel);
 
   // レイキャスター
@@ -119,19 +119,20 @@ export function setupVR(renderer, container, scene, gvrm, gvrmFiles, fbxFiles, c
     raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
     raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
 
-    const intersects = raycaster.intersectObjects([leftPanel, rightPanel], true);
+    const intersects = raycaster.intersectObjects([rightPanel], true);
 
     if (intersects.length > 0) {
       const intersectedObject = intersects[0].object;
 
-      if (intersectedObject === leftPanel) {
-        // Switch Avatar
-        if (!gvrm || !gvrm.isReady || gvrm.character.isLoading()) return;
-        currentGvrmIndex = (currentGvrmIndex + 1) % gvrmFiles.length;
-        await gvrm.remove(scene);
-        await gvrm.load(gvrmFiles[currentGvrmIndex], scene, camera, renderer, fileName);
-        await gvrm.changeFBX(fbxFiles[currentFbxIndex]);
-      } else if (intersectedObject === rightPanel) {
+      // if (intersectedObject === leftPanel) {
+      //   // Switch Avatar
+      //   if (!gvrm || !gvrm.isReady || gvrm.character.isLoading()) return;
+      //   currentGvrmIndex = (currentGvrmIndex + 1) % gvrmFiles.length;
+      //   await gvrm.remove(scene);
+      //   await gvrm.load(gvrmFiles[currentGvrmIndex], scene, camera, renderer, fileName);
+      //   await gvrm.changeFBX(fbxFiles[currentFbxIndex]);
+      // } else
+      if (intersectedObject === rightPanel) {
         // Switch Animation
         if (!gvrm) return;
         currentFbxIndex = (currentFbxIndex + 1) % fbxFiles.length;
@@ -144,7 +145,7 @@ export function setupVR(renderer, container, scene, gvrm, gvrmFiles, fbxFiles, c
   controller1.addEventListener("selectstart", onSelectStart);
 
   /**
-   * パネルの位置を更新（アバターの左右に配置）
+   * パネルの位置を更新（アバターの右側に配置）
    */
   function updatePanels() {
     if (!gvrm || !gvrm.character || !gvrm.character.currentVrm) return;
@@ -152,13 +153,13 @@ export function setupVR(renderer, container, scene, gvrm, gvrmFiles, fbxFiles, c
     const avatarScene = gvrm.character.currentVrm.scene;
     const avatarPosition = avatarScene.position;
 
-    // アバターの左側に「Switch Avatar」パネル
-    leftPanel.position.set(
-      avatarPosition.x - 0.6,  // 左に60cm
-      avatarPosition.y + 1.2,  // 高さ1.2m（胸あたり）
-      avatarPosition.z
-    );
-    leftPanel.lookAt(camera.position);
+    // アバターの左側に「Switch Avatar」パネル（無効化）
+    // leftPanel.position.set(
+    //   avatarPosition.x - 0.6,  // 左に60cm
+    //   avatarPosition.y + 1.2,  // 高さ1.2m（胸あたり）
+    //   avatarPosition.z
+    // );
+    // leftPanel.lookAt(camera.position);
 
     // アバターの右側に「Switch Animation」パネル
     rightPanel.position.set(
@@ -170,7 +171,7 @@ export function setupVR(renderer, container, scene, gvrm, gvrmFiles, fbxFiles, c
 
     // VRセッション中のみ表示
     const isVRActive = renderer.xr.isPresenting;
-    leftPanel.visible = isVRActive;
+    // leftPanel.visible = isVRActive;
     rightPanel.visible = isVRActive;
   }
 

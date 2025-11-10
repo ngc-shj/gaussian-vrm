@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<head>
+  <title>Simple GVRM Joycon Walker</title>
+  <style>
+    body { margin: 0; overflow: hidden; background-color: #222; }
+    #info {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      color: white;
+      font-family: monospace;
+      font-size: 14px;
+      background-color: rgba(0, 0, 0, 0.7);
+      padding: 10px;
+      border-radius: 5px;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  <div id="info">
+    Controller: Not connected<br>
+    Press any button on your PS4/Xbox controller
+  </div>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.min.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/",
+        "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@2.1.0/lib/three-vrm.module.js",
+        "gaussian-splats-3d": "https://naruya.github.io/gs-edit/lib/gaussian-splats-3d.module.js",
+        "jszip": "https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm",
+        "gvrm": "https://naruya.github.io/gs-edit/lib/gaussian-vrm.min.js"
+      }
+    }
+  </script>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { GVRM } from 'gvrm';
+
+    const canvas = document.getElementById('canvas');
+    const infoDiv = document.getElementById('info');
+    const renderer = new THREE.WebGLRenderer({ canvas });
+    renderer.setSize(640, 480);
+
+    const scene = new THREE.Scene();
+
+    const axesHelper = new THREE.AxesHelper(1);
+    scene.add(axesHelper);
+
+    const camera = new THREE.PerspectiveCamera(65, 640 / 480, 0.01, 100);
+    camera.position.set(2.4, 2.4, 4);
+    camera.lookAt(0, 1, 0);
+
+    // GVRM
+    const gvrm = await GVRM.load('./assets/sample.gvrm', scene, camera, renderer);
+    const character = gvrm.character.currentVrm.scene;
+    character.position.set(0, 0, 0);
+
+    // Load Walking animation
+    await gvrm.changeFBX('./assets/Walking.fbx');
+    gvrm.character.action.play();
+
+    const speed = 0.02;
+    const speedBoost = 3.0;
+
+    // Get default rotation
+    const rot0 = character.rotation0.clone();
+
+    // Jump physics
+    let velocityY = 0;
+    let isJumping = false;
+    const gravity = -0.008;
+    const jumpPower = 0.10;
+    const groundY = 0;
+
+    // Gamepad state
+    let gamepad = null;
+    let gamepadConnected = false;
+    let previousCircleButton = false;
+
+    // Gamepad connection detection
+    window.addEventListener('gamepadconnected', (e) => {
+      gamepad = e.gamepad;
+      gamepadConnected = true;
+      infoDiv.innerHTML = `Controller: ${gamepad.id}<br>Left stick: Move | ○: Jump | ×: Speed boost`;
+      console.log('Gamepad connected:', gamepad.id);
+    });
+
+    window.addEventListener('gamepaddisconnected', (e) => {
+      gamepad = null;
+      gamepadConnected = false;
+      infoDiv.innerHTML = 'Controller: Not connected<br>Press any button on your PS4/Xbox controller';
+      console.log('Gamepad disconnected');
+    });
+
+    // Get gamepad input with deadzone
+    function getGamepadInput() {
+      if (!gamepadConnected) return { x: 0, y: 0, magnitude: 0, circleButton: false, crossButton: false };
+
+      // Need to call navigator.getGamepads() each frame to get updated state
+      const gamepads = navigator.getGamepads();
+      gamepad = gamepads[gamepad.index];
+
+      if (!gamepad) return { x: 0, y: 0, magnitude: 0, circleButton: false, crossButton: false };
+
+      const deadzone = 0.15;
+      let x = gamepad.axes[0] || 0;  // Left stick horizontal
+      let y = gamepad.axes[1] || 0;  // Left stick vertical
+
+      // Calculate magnitude
+      const magnitude = Math.sqrt(x * x + y * y);
+
+      // Apply deadzone
+      if (magnitude < deadzone) {
+        x = 0;
+        y = 0;
+      }
+
+      // Buttons: 0 = Cross (×), 1 = Circle (○)
+      const crossButton = gamepad.buttons[0]?.pressed || false;
+      const circleButton = gamepad.buttons[1]?.pressed || false;
+
+      return { x, y, magnitude: magnitude < deadzone ? 0 : magnitude, circleButton, crossButton };
+    }
+
+    renderer.setAnimationLoop(() => {
+      gvrm.update();
+
+      const input = getGamepadInput();
+
+      // Jump (○ button) - trigger on button press (not hold)
+      if (input.circleButton && !previousCircleButton && !isJumping) {
+        velocityY = jumpPower;
+        isJumping = true;
+      }
+      previousCircleButton = input.circleButton;
+
+      // Apply jump physics
+      if (isJumping || character.position.y > groundY) {
+        velocityY += gravity;
+        character.position.y += velocityY;
+
+        // Land on ground
+        if (character.position.y <= groundY) {
+          character.position.y = groundY;
+          velocityY = 0;
+          isJumping = false;
+        }
+      }
+
+      // Speed boost (× button)
+      const currentSpeed = input.crossButton ? speed * speedBoost : speed;
+
+      // Move in the direction of the joystick
+      if (input.magnitude > 0) {
+        // Calculate target angle from joystick input
+        // atan2(x, y) gives angle where +x is right, +y is forward
+        const targetAngle = Math.atan2(input.x, input.y);
+
+        // Set character rotation to face the target direction
+        character.rotation.y = targetAngle + rot0.y;
+
+        // Move forward at constant speed (or boosted speed)
+        character.position.x += currentSpeed * Math.sin(targetAngle);
+        character.position.z += currentSpeed * Math.cos(targetAngle);
+      }
+
+      renderer.render(scene, camera);
+    });
+  </script>
+</body>
+</html>
