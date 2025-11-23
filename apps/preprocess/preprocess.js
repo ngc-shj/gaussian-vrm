@@ -7,14 +7,47 @@ import { GVRM } from '../../gvrm-format/gvrm.js';
 import { PLYParser } from '../../gvrm-format/ply.js';
 import * as GVRMUtils from '../../gvrm-format/utils.js';
 import { PoseDetector } from './pose.js';
-import { DropInViewer } from 'gaussian-splats-3d';
 import { assignSplatsToBonesGL, assignSplatsToPointsGL } from './preprocess_gl.js';
 import { finalCheck } from './check.js';
+
+// Conditional import for browser-only module
+let DropInViewer;
+try {
+  const module = await import('gaussian-splats-3d');
+  DropInViewer = module.DropInViewer;
+} catch (e) {
+  // Running in Node.js CLI - use mock instead
+  DropInViewer = null;
+}
 
 
 async function assignSplatsToBones(gs, capsules, capsuleBoneIndex, fast = false) {
   gs.splatBoneIndices = [];
   let bestCi = 0;
+
+  // Detect CLI mode - capsules will be empty because we don't have real mesh geometry
+  console.log(`[assignSplatsToBones] capsules.children.length: ${capsules.children.length}`);
+  console.log(`[assignSplatsToBones] capsuleBoneIndex.length: ${capsuleBoneIndex.length}`);
+
+  const isCliMode = capsules.children.length === 0;
+
+  if (isCliMode) {
+    console.log('[assignSplatsToBones] CLI skeleton-only mode detected - assigning default bone index 0 to all splats');
+    // In CLI mode without capsules, assign all splats to bone index 0
+    const defaultBoneIndex = 0;
+    for (let i = 0; i < gs.splatCount; i++) {
+      gs.splatBoneIndices.push(defaultBoneIndex);
+      gs.colors[i * 4 + 0] = GVRMUtils.colors[0][0];
+      gs.colors[i * 4 + 1] = GVRMUtils.colors[0][1];
+      gs.colors[i * 4 + 2] = GVRMUtils.colors[0][2];
+    }
+    console.log(`[assignSplatsToBones] Assigned ${gs.splatBoneIndices.length} splats (first 10: [${gs.splatBoneIndices.slice(0, 10).join(', ')}])`);
+    // Update textures in browser mode
+    if (gs.splatMesh && gs.splatMesh.updateDataTexturesFromBaseData) {
+      gs.splatMesh.updateDataTexturesFromBaseData(0, gs.splatCount - 1);
+    }
+    return;
+  }
 
   for (let i = 0; i < gs.splatCount; i++) {
     if (fast && i % 10 !== 0) {  // CHANGED
@@ -36,6 +69,11 @@ async function assignSplatsToBones(gs, capsules, capsuleBoneIndex, fast = false)
       const geometry = capsule.geometry;
       const position = geometry.getAttribute('position');
       const index = geometry.index;
+
+      // Skip capsules without index (CLI mode)
+      if (!index) {
+        continue;
+      }
 
       const triangle = new THREE.Triangle();
 
@@ -88,6 +126,25 @@ async function assignSplatsToPoints(character, gs, capsules, capsuleBoneIndex, f
   gs.splatVertexIndices = [];
 
   const position = skinnedMesh.geometry.getAttribute('position');
+
+  // Detect CLI mode
+  const isCliMode = position && position.count <= 3;
+
+  if (isCliMode) {
+    console.log('[assignSplatsToPoints] CLI skeleton-only mode detected - using simplified vertex assignment');
+    // In CLI mode, we create minimal data structures for GVRM export
+    // All splats get assigned to vertex 0 with zero relative pose
+    for (let i = 0; i < gs.splatCount; i++) {
+      gs.splatVertexIndices.push(0);
+    }
+
+    // Create relative poses (all zeros since we can't compute them without proper vertices)
+    gs.splatRelativePoses = new Array(gs.splatCount * 3).fill(0);
+
+    console.log(`[assignSplatsToPoints] CLI mode: assigned ${gs.splatCount} splats to default vertex`);
+    return;
+  }
+
   const boneVertexIndices = {};
 
   Object.values(capsuleBoneIndex).forEach(value => {
@@ -110,6 +167,11 @@ async function assignSplatsToPoints(character, gs, capsules, capsuleBoneIndex, f
       const capsuleGeometry = capsule.geometry;
       const capsulePosition = capsuleGeometry.getAttribute('position');
       const index = capsuleGeometry.index;
+
+      // Skip capsules without index (CLI mode)
+      if (!index) {
+        continue;
+      }
 
       const triangle = new THREE.Triangle();
 
@@ -244,13 +306,28 @@ async function cleanSplats(gsPath, loadingSpinner, hints = null, scene = null, c
 
     const N = 5;
 
+    // Debug: Check first vertex
+    if (phase === 1 && vertices.length > 0) {
+      console.log(`  DEBUG vertices[0]: x=${vertices[0].x}, y=${vertices[0].y}, z=${vertices[0].z}, hasX=${vertices[0].x !== undefined}`);
+    }
+
     let radiusFilteredVertices = vertices.filter((vertex, i) =>
       Math.abs(vertex.y) < distY &&
       Math.sqrt((vertex.x - centroid.x) ** 2 + (vertex.z - centroid.z) ** 2) < distXZ * thresh
     );
 
+    // SAM 3D Body fix: Check if we have any vertices
+    if (radiusFilteredVertices.length === 0) {
+      console.warn('No vertices in search radius, using all vertices');
+      radiusFilteredVertices = vertices.filter(v => Math.abs(v.y) < distY);
+      console.log(`  DEBUG: After fallback filter: ${radiusFilteredVertices.length} vertices (distY=${distY})`);
+    }
+
     // NOTE: gs rotation
     const yCoords = radiusFilteredVertices.map(vertex => Math.round(-vertex.y * 100));
+    if (yCoords.length === 0) {
+      throw new Error('No valid vertices found for height calculation');
+    }
     const minY = yCoords.reduce((min, y) => Math.min(min, y), yCoords[0]) - N;
     const maxY = yCoords.reduce((max, y) => Math.max(max, y), yCoords[0]) + N;
 
@@ -526,8 +603,15 @@ async function cleanSplats(gsPath, loadingSpinner, hints = null, scene = null, c
   let heights, centroid, centroidHead;
 
   {
-    // expand the search range from the origin to find the target. 0.3 ~ max 3.0
-    ({ heights, distXZ } = await calculateHeights(plyData.vertices, null, null, 0.3, 1.0, 1));
+    // SAM 3D Body fix: Calculate initial centroid from all vertices
+    const initialCentroid = {
+      x: plyData.vertices.reduce((sum, v) => sum + (v.x || 0), 0) / plyData.vertices.length,
+      z: plyData.vertices.reduce((sum, v) => sum + (v.z || 0), 0) / plyData.vertices.length
+    };
+    console.log(`Initial centroid from all vertices: x=${initialCentroid.x.toFixed(3)}, z=${initialCentroid.z.toFixed(3)}`);
+
+    // expand the search range from the initial centroid to find the target. 0.3 ~ max 3.0
+    ({ heights, distXZ } = await calculateHeights(plyData.vertices, null, initialCentroid, 0.3, 1.0, 1));
     centroid = await calculateCentroidFeet(plyData.vertices, heights, centroid, distXZ);
 
     ({ heights, distXZ } = await calculateHeights(plyData.vertices, heights, centroid, 0.3, 1.0, 2));
@@ -698,8 +782,29 @@ export async function preprocess(vrmPath, gsPath, scene, camera, renderer, stage
   const gsPathOrig = gsPath;
   let vrmScale = null;
   const cameraPosition0 = new THREE.Vector3().copy(camera.position);
-  const poseDetector = new PoseDetector(scene, camera, renderer);
-  let loadingSpinner = new DropInViewer().viewer.loadingSpinner;
+  // Only create PoseDetector if nocheck is false (pose detection is needed)
+  const poseDetector = nocheck ? null : new PoseDetector(scene, camera, renderer);
+
+  // Use MockDropInViewer in Node.js CLI environment, otherwise use real DropInViewer
+  let loadingSpinner;
+  if (DropInViewer === null && typeof global !== 'undefined' && global.MockDropInViewer) {
+    // Node.js CLI environment
+    loadingSpinner = new global.MockDropInViewer().viewer.loadingSpinner;
+  } else if (DropInViewer) {
+    // Browser environment
+    loadingSpinner = new DropInViewer().viewer.loadingSpinner;
+  } else {
+    // Fallback
+    loadingSpinner = {
+      addTask: (name) => {
+        console.log(`[Task] ${name}`);
+        return `task-${Date.now()}`;
+      },
+      removeTask: (id) => {
+        console.log(`[Task completed] ${id}`);
+      }
+    };
+  }
   console.log("hints", hints);
 
   async function moveCameraAndDetect_(camera, scene, renderer, poseDetector, angle, radius, radiusMultiplier = 1.0, visualize = true) {
@@ -765,8 +870,19 @@ export async function preprocess(vrmPath, gsPath, scene, camera, renderer, stage
 
     // main gs
     try {
+      console.log('[Stage 2] Loading main GS...');
       gs = await GVRM.initGS(gsPath, undefined, undefined, scene);
-      character = await GVRM.initVRM(vrmPath, scene, camera, renderer, vrmScale);
+      console.log('[Stage 2] ✓ Main GS loaded');
+
+      // Get boneOperations from hints if available
+      if (hints && hints.boneOperations) {
+        boneOperations = hints.boneOperations;
+        console.log('[Stage 2] Using boneOperations from hints');
+      }
+
+      console.log('[Stage 2] Loading VRM...');
+      character = await GVRM.initVRM(vrmPath, scene, camera, renderer, vrmScale, boneOperations);
+      console.log('[Stage 2] ✓ VRM loaded');
     } catch (error) {
       console.error(`Error loading main GS or VRM: ${error.message}`);
       throw new Error(`Error loading main GS or VRM: ${error.message}`);
@@ -912,20 +1028,24 @@ export async function preprocess(vrmPath, gsPath, scene, camera, renderer, stage
 
 
     // adjust the tilt of the vrm
-    try {
-      const dx = circleHead.position.x - circle.position.x;
-      const dy = circleHead.position.y - circle.position.y;
-      const dz = circleHead.position.z - circle.position.z;
-      const angleRadians = Math.atan2(dy, dx);
-      const angleDegrees = angleRadians * (180 / Math.PI);
-      const angleRadians2 = Math.atan2(dz, dy);
-      const angleDegrees2 = angleRadians2 * (180 / Math.PI);
-      console.log("angleDegrees", angleDegrees, "angleDegrees2", angleDegrees2);
-      character.currentVrm.scene.rotation.x = angleRadians2;
-      character.currentVrm.scene.rotation.z = Math.PI * 0.5 - angleRadians;
-    } catch (error) {
-      console.error(`Error adjusting the tilt of the VRM: ${error.message}`);
-      throw new Error(`Error adjusting the tilt of the VRM: ${error.message}`);
+    if (circle && circleHead) {
+      try {
+        const dx = circleHead.position.x - circle.position.x;
+        const dy = circleHead.position.y - circle.position.y;
+        const dz = circleHead.position.z - circle.position.z;
+        const angleRadians = Math.atan2(dy, dx);
+        const angleDegrees = angleRadians * (180 / Math.PI);
+        const angleRadians2 = Math.atan2(dz, dy);
+        const angleDegrees2 = angleRadians2 * (180 / Math.PI);
+        console.log("angleDegrees", angleDegrees, "angleDegrees2", angleDegrees2);
+        character.currentVrm.scene.rotation.x = angleRadians2;
+        character.currentVrm.scene.rotation.z = Math.PI * 0.5 - angleRadians;
+      } catch (error) {
+        console.error(`Error adjusting the tilt of the VRM: ${error.message}`);
+        throw new Error(`Error adjusting the tilt of the VRM: ${error.message}`);
+      }
+    } else {
+      console.log("Skipping VRM tilt adjustment (circle or circleHead not available)");
     }
 
 
@@ -1091,26 +1211,44 @@ export async function preprocess(vrmPath, gsPath, scene, camera, renderer, stage
       }
     } else {
       try {
+        console.log('[Stage 2] Loading default bone operations from assets/default.json...');
         // const jsonPath = gsPath.replace(".ply", ".json");
         // let response = await fetch(jsonPath);
         // use default bone operations
         let response = await fetch("./assets/default.json");
+        console.log('[Stage 2] Parsing bone operations JSON...');
         const params = await response.json();
         boneOperations = params.boneOperations;
+        console.log('[Stage 2] Resetting pose with bone operations...');
         GVRMUtils.resetPose(character, boneOperations);
+        console.log('[Stage 2] Updating matrix world...');
         // TODO: refactor
         character.currentVrm.scene.updateMatrixWorld(true);
+        console.log('[Stage 2] ✓ Bone operations applied');
       } catch (error) {
         console.error(`Error loading default bone operations: ${error.message}`);
         throw new Error(`Error loading default bone operations: ${error.message}`);
       }
     }
 
-
+    console.log('[Stage 2] About to call getPointsMeshCapsules...');
     const { pmc, capsuleBoneIndex } = GVRMUtils.getPointsMeshCapsules(character);
+    console.log('[Stage 2] ✓ getPointsMeshCapsules complete');
+    console.log('[Stage 2] Adding PMC to scene...');
     GVRMUtils.addPMC(scene, pmc);
+    console.log('[Stage 2] ✓ addPMC complete');
     GVRMUtils.visualizePMC(pmc, false);
-    renderer.render(scene, camera);
+    console.log('[Stage 2] ✓ visualizePMC complete');
+
+    // Skip rendering in CLI mode (detect by checking if geometry has minimal vertices)
+    const skinnedMesh = character.currentVrm.scene.children[character.skinnedMeshIndex];
+    const posAttr = skinnedMesh?.geometry?.getAttribute('position');
+    if (posAttr && posAttr.count > 3) {
+      renderer.render(scene, camera);
+    } else {
+      console.log('[Stage 2] Skipping render (CLI skeleton-only mode)');
+    }
+    console.log('[Stage 2] ✓ PMC added and visualized');
 
     if (!nocheck) {
       await finalCheck(pmc, moveCameraAndDetect_, camera, scene, renderer, poseDetector, radius, vrmScale, 0.15);
@@ -1131,20 +1269,39 @@ export async function preprocess(vrmPath, gsPath, scene, camera, renderer, stage
     gvrm.modelScale = vrmScale;
     gvrm.boneOperations = boneOperations;
     gvrm.pmc = pmc;
+    console.log('[Stage 2] Visualizing PMC...');
     GVRMUtils.visualizePMC(pmc, true);
-    renderer.render(scene, camera);
+
+    // Skip rendering in CLI mode
+    if (posAttr && posAttr.count > 3) {
+      console.log('[Stage 2] Rendering scene...');
+      renderer.render(scene, camera);
+    } else {
+      console.log('[Stage 2] Skipping final render (CLI skeleton-only mode)');
+    }
+    console.log('[Stage 2] Starting preprocess2...');
 
     async function preprocess2() {
       try {
         if (!useGPU) {
+          console.log('[preprocess2] Starting assignSplatsToBones (CPU mode)...');
           await assignSplatsToBones(gs, pmc.capsules, capsuleBoneIndex);
+          console.log('[preprocess2] ✓ assignSplatsToBones complete');
+          console.log('[preprocess2] Starting assignSplatsToPoints (CPU mode)...');
           await assignSplatsToPoints(character, gs, pmc.capsules, capsuleBoneIndex);
+          console.log('[preprocess2] ✓ assignSplatsToPoints complete');
         } else {
+          console.log('[preprocess2] Starting assignSplatsToBonesGL (GPU mode)...');
           await assignSplatsToBonesGL(gs, pmc.capsules, capsuleBoneIndex);
+          console.log('[preprocess2] ✓ assignSplatsToBonesGL complete');
+          console.log('[preprocess2] Starting assignSplatsToPointsGL (GPU mode)...');
           await assignSplatsToPointsGL(character, gs, pmc.capsules, capsuleBoneIndex);
+          console.log('[preprocess2] ✓ assignSplatsToPointsGL complete');
         }
 
+        console.log('[preprocess2] Saving GVRM file...');
         await gvrm.save(vrmPath, gsPath, boneOperations, vrmScale, fileName, savePly);
+        console.log('[preprocess2] ✓ GVRM file saved');
 
         // Store the new URL before cleaning up old objects
         const newGvrmUrl = gvrm.url;
@@ -1161,7 +1318,13 @@ export async function preprocess(vrmPath, gsPath, scene, camera, renderer, stage
         await new Promise(resolve => setTimeout(resolve, 100));
 
         // Reload GVRM to refresh internal state (like debug rm&load but without expensive removeGVRM)
-        await gvrm.load(newGvrmUrl, scene, camera, renderer, fileName);
+        // Skip reload in CLI mode (file:// URLs don't work with our fetch mock)
+        const isCliMode = typeof process !== 'undefined' && process.versions && process.versions.node;
+        if (!isCliMode) {
+          await gvrm.load(newGvrmUrl, scene, camera, renderer, fileName);
+        } else {
+          console.log('[preprocess2] Skipping GVRM reload in CLI mode (file already saved to disk)');
+        }
 
         if (stage < 1 && circle) {
           scene.remove(circle);
@@ -1184,7 +1347,15 @@ export async function preprocess(vrmPath, gsPath, scene, camera, renderer, stage
 
     let promise2 = preprocess2();
 
-    return { 'gvrm': gvrm, 'promise2': promise2 };
+    return {
+      'gvrm': gvrm,
+      'promise2': promise2,
+      'vrmPath': vrmPath,
+      'gsPath': gsPath,
+      'boneOperations': boneOperations,
+      'vrmScale': vrmScale,
+      'fileName': fileName
+    };
 
   } catch (error) {
     if (hints && !hints.retry) {
@@ -1206,9 +1377,11 @@ export async function preprocess(vrmPath, gsPath, scene, camera, renderer, stage
         circleHead.geometry.dispose();
         circleHead.material.dispose();
       }
-      poseDetector.keypointAxes.forEach((axes) => {
-        axes.visible = false;
-      });
+      if (poseDetector && poseDetector.keypointAxes) {
+        poseDetector.keypointAxes.forEach((axes) => {
+          axes.visible = false;
+        });
+      }
       camera.position.copy(cameraPosition0);
 
       const el = document.getElementById("error-display");

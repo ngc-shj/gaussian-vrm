@@ -215,14 +215,30 @@ export function getPointsMeshCapsules(character) {
 
   const geometry = skinnedMesh.geometry;
   const position = geometry.getAttribute('position');
-  const vertex = new THREE.Vector3();
-  let skinnedVertex = new THREE.Vector3();
 
-  for (let i = 0; i < position.count; i++) {
-    vertex.fromBufferAttribute(position, i);
-    skinnedVertex = skinnedMesh.applyBoneTransform(i, vertex);
-    skinnedVertex.applyMatrix4(character.currentVrm.scene.matrixWorld);
-    vertices.push(skinnedVertex.x, skinnedVertex.y, skinnedVertex.z);
+  // Detect CLI mode by checking if position count is minimal (3 vertices = skeleton-only mode)
+  const isCliMode = position && position.count <= 3;
+
+  if (isCliMode) {
+    console.log('[getPointsMeshCapsules] CLI mode detected, using simple vertex positions');
+    // In CLI mode, just use the position attribute directly without bone transforms
+    for (let i = 0; i < position.count; i++) {
+      const x = position.getX(i);
+      const y = position.getY(i);
+      const z = position.getZ(i);
+      vertices.push(x, y, z);
+    }
+  } else {
+    // Browser mode: apply bone transforms
+    const vertex = new THREE.Vector3();
+    let skinnedVertex = new THREE.Vector3();
+
+    for (let i = 0; i < position.count; i++) {
+      vertex.fromBufferAttribute(position, i);
+      skinnedVertex = skinnedMesh.applyBoneTransform(i, vertex);
+      skinnedVertex.applyMatrix4(character.currentVrm.scene.matrixWorld);
+      vertices.push(skinnedVertex.x, skinnedVertex.y, skinnedVertex.z);
+    }
   }
 
   pointsGeometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
@@ -290,8 +306,32 @@ export function getPointsMeshCapsules(character) {
     });
   }
 
-  const rootNode = character.currentVrm.scene.children[0].children[0];
-  _traverseNodes(rootNode, 1);
+  let rootNode = character.currentVrm.scene.children[0].children[0];
+
+  // In CLI mode, use skeleton bones directly if rootNode doesn't exist or isn't valid
+  if (isCliMode && (!rootNode || !rootNode.children)) {
+    console.log('[getPointsMeshCapsules] CLI mode: Using skeleton bones directly as rootNode');
+    // Use the first bone in the skeleton as root
+    if (skinnedMesh.skeleton && skinnedMesh.skeleton.bones && skinnedMesh.skeleton.bones.length > 0) {
+      rootNode = skinnedMesh.skeleton.bones[0];
+      // Ensure all bones have matrixWorld initialized
+      skinnedMesh.skeleton.bones.forEach(bone => {
+        if (!bone.matrixWorld) {
+          bone.matrixWorld = new THREE.Matrix4();
+        }
+        bone.updateMatrixWorld(true);
+      });
+    }
+  } else if (isCliMode) {
+    console.log('[getPointsMeshCapsules] Updating skeleton bone matrices for CLI mode...');
+    character.currentVrm.scene.updateMatrixWorld(true);
+  }
+
+  if (rootNode) {
+    _traverseNodes(rootNode, 1);
+  } else {
+    console.warn('[getPointsMeshCapsules] No valid rootNode found, skipping bone traversal');
+  }
 
   const pmc = { points, mesh, capsules };
   return { pmc, capsuleBoneIndex };

@@ -22,32 +22,64 @@ export class GVRM extends THREE.Group {
 
   static async initVRM(vrmPath, scene, camera, renderer, modelScale, boneOperations) {
     if ( !boneOperations ) {
-      boneOperations = (await (await fetch("./assets/default.json")).json()).boneOperations;
+      // Try to load default bone operations
+      // In Node.js environment, this may not work with fetch
+      try {
+        if (typeof fetch !== 'undefined') {
+          boneOperations = (await (await fetch("./assets/default.json")).json()).boneOperations;
+        } else {
+          console.warn('fetch not available in Node.js, boneOperations must be provided');
+          // Default to empty array if not provided
+          boneOperations = [];
+        }
+      } catch (error) {
+        console.warn('Could not load default.json, using empty boneOperations');
+        boneOperations = [];
+      }
     }
     if ( !modelScale ) {
       modelScale = 1.0;
     }
+    console.log('[initVRM] Creating VRMCharacter...');
     const character = new VRMCharacter(scene, vrmPath, '', modelScale, true);
+    console.log('[initVRM] Waiting for VRM to load...');
     await character.loadingPromise;
+    console.log('[initVRM] VRM loaded');
 
+    console.log('[initVRM] Setting up mesh indices...');
     character.skinnedMeshIndex = 1;
     character.faceIndex = undefined;
+    console.log('[initVRM] scene.children.length:', character.currentVrm.scene.children.length);
     if (character.currentVrm.scene.children.length > 4) {
       character.skinnedMeshIndex = 2;
       character.faceIndex = 1;
     }
 
+    console.log('[initVRM] Getting skinnedMesh at index', character.skinnedMeshIndex);
     const skinnedMesh = character.currentVrm.scene.children[character.skinnedMeshIndex];
+    console.log('[initVRM] skinnedMesh:', skinnedMesh?.name, 'has material:', !!skinnedMesh?.material);
 
+    console.log('[initVRM] Calling visualizeVRM...');
     GVRMUtils.visualizeVRM(character, false);
 
+    console.log('[initVRM] Setting pose...');
     GVRMUtils.setPose(character, boneOperations);
 
     // character.currentVrm.scene.updateMatrixWorld(true);
+    console.log('[initVRM] Updating skeleton...');
     skinnedMesh.skeleton.update();
-    skinnedMesh.skeleton.computeBoneTexture();
-    skinnedMesh.geometry.computeVertexNormals();
 
+    // Only compute bone texture and vertex normals if geometry has valid attributes (skip in CLI mode)
+    const posAttr = skinnedMesh.geometry.getAttribute('position');
+    if (posAttr && posAttr.count > 3) {
+      console.log('[initVRM] Computing bone texture and vertex normals...');
+      skinnedMesh.skeleton.computeBoneTexture();
+      skinnedMesh.geometry.computeVertexNormals();
+    } else {
+      console.log('[initVRM] Skipping bone texture/vertex normals (CLI skeleton-only mode)');
+    }
+
+    console.log('[initVRM] Checking for head node additions...');
     if (character.skinnedMeshIndex === 2) {
       const headNode = character.currentVrm.humanoid.getRawBoneNode('head');
       const headTopEndNode = new THREE.Bone();
@@ -58,22 +90,38 @@ export class GVRM extends THREE.Group {
       skinnedMesh.skeleton.bones.push(headTopEndNode);
       skinnedMesh.bind(new THREE.Skeleton(skinnedMesh.skeleton.bones), skinnedMesh.matrixWorld);
     }
-    // call renderer.render after skinnedMesh.bind (?)
-    renderer.render(scene, camera);  // ???
+
+    // Skip rendering in CLI mode (CLI mode has minimal geometry that causes errors)
+    if (posAttr && posAttr.count > 3) {
+      console.log('[initVRM] Rendering scene...');
+      renderer.render(scene, camera);
+      console.log('[initVRM] ✓ Render complete');
+    } else {
+      console.log('[initVRM] Skipping render (CLI skeleton-only mode)');
+    }
 
     // do not use .clone(), texture.image will be shared unexpectedly
     // const boneTexture0 = skinnedMesh.skeleton.boneTexture.clone();
     skinnedMesh.bindMatrix0 = skinnedMesh.bindMatrix.clone();
     skinnedMesh.bindMatrixInverse0 = skinnedMesh.bindMatrixInverse.clone();
 
-    const widthtex = skinnedMesh.skeleton.boneTexture.image.width;
-    const heighttex = skinnedMesh.skeleton.boneTexture.image.height;
-    const format = skinnedMesh.skeleton.boneTexture.format;
-    const type = skinnedMesh.skeleton.boneTexture.type;
-    const dataCopy = skinnedMesh.skeleton.boneTexture.image.data.slice();
-    skinnedMesh.boneTexture0 = new THREE.DataTexture(dataCopy, widthtex, heighttex, format, type);
-    skinnedMesh.boneTexture0.needsUpdate = true;
+    // Only copy bone texture if it exists (skip in CLI skeleton-only mode)
+    if (skinnedMesh.skeleton.boneTexture && skinnedMesh.skeleton.boneTexture.image) {
+      console.log('[initVRM] Copying bone texture...');
+      const widthtex = skinnedMesh.skeleton.boneTexture.image.width;
+      const heighttex = skinnedMesh.skeleton.boneTexture.image.height;
+      const format = skinnedMesh.skeleton.boneTexture.format;
+      const type = skinnedMesh.skeleton.boneTexture.type;
+      const dataCopy = skinnedMesh.skeleton.boneTexture.image.data.slice();
+      skinnedMesh.boneTexture0 = new THREE.DataTexture(dataCopy, widthtex, heighttex, format, type);
+      skinnedMesh.boneTexture0.needsUpdate = true;
+    } else {
+      console.log('[initVRM] Skipping bone texture copy (CLI skeleton-only mode)');
+      // Create minimal mock bone texture for CLI mode
+      skinnedMesh.boneTexture0 = null;
+    }
 
+    console.log('[initVRM] ✓ VRM character initialized successfully');
     return character;
   }
 
@@ -85,10 +133,37 @@ export class GVRM extends THREE.Group {
     scene.add(gs);
 
     gs.splatMesh = gs.viewer.splatMesh;
-    gs.centers = gs.splatMesh.splatDataTextures.baseData.centers;
-    gs.colors = gs.splatMesh.splatDataTextures.baseData.colors;
-    gs.covariances = gs.splatMesh.splatDataTextures.baseData.covariances;
-    gs.splatCount = gs.splatMesh.geometry.attributes.splatIndex.array.length;
+
+    // Check if we're in CLI mode (no splatDataTextures) or browser mode
+    if (gs.splatMesh.splatDataTextures && gs.splatMesh.splatDataTextures.baseData) {
+      // Browser mode: Use splatDataTextures
+      gs.centers = gs.splatMesh.splatDataTextures.baseData.centers;
+      gs.colors = gs.splatMesh.splatDataTextures.baseData.colors;
+      gs.covariances = gs.splatMesh.splatDataTextures.baseData.covariances;
+      gs.splatCount = gs.splatMesh.geometry.attributes.splatIndex.array.length;
+    } else {
+      // CLI mode: Properties are already set in GaussianSplatting constructor
+      // gs.colors, gs.positions, gs.scales, gs.rotations are already available
+      // We need to set centers and covariances if not already set
+      if (!gs.centers) {
+        gs.centers = gs.positions;  // Centers are same as positions in CLI mode
+      }
+      if (!gs.covariances) {
+        // Create covariances from scales and rotations (simplified for CLI mode)
+        gs.covariances = new Float32Array(gs.splatCount * 6);
+        // This is a placeholder - covariances would need proper calculation
+        // For now, we'll just use identity-like values
+        for (let i = 0; i < gs.splatCount; i++) {
+          gs.covariances[i * 6 + 0] = 1.0;
+          gs.covariances[i * 6 + 1] = 0.0;
+          gs.covariances[i * 6 + 2] = 0.0;
+          gs.covariances[i * 6 + 3] = 1.0;
+          gs.covariances[i * 6 + 4] = 0.0;
+          gs.covariances[i * 6 + 5] = 1.0;
+        }
+      }
+      // splatCount is already set in GaussianSplatting
+    }
 
     gs.centers0 = new Float32Array(gs.centers);
     gs.colors0 = new Float32Array(gs.colors);
@@ -125,6 +200,10 @@ export class GVRM extends THREE.Group {
 
     // dynamic sort (choose one splat sort)
     const { sceneSplatIndices, boneSceneMap } = GVRM.sortSplatsByBones(extraData);
+    console.log(`[GVRM.load] Scene count: ${Object.keys(sceneSplatIndices).length}`);
+    console.log(`[GVRM.load] First 5 scenes splat counts:`,
+      Object.entries(sceneSplatIndices).slice(0, 5).map(([k, v]) => `scene ${k}: ${v.length} splats`));
+    console.log(`[GVRM.load] boneSceneMap:`, boneSceneMap);
     // const { sceneSplatIndices, vertexSceneMap } = GVRM.sortSplatsByVertices(extraData);
     const parser = new PLYParser();
     const sceneUrls  = await parser.splitPLY(plyUrl, sceneSplatIndices);
@@ -201,6 +280,8 @@ export class GVRM extends THREE.Group {
     const vrmBuffer = await fetch(vrmPath).then(response => response.arrayBuffer());
     const plyBuffer = await fetch(gsPath).then(response => response.arrayBuffer());
 
+    console.log(`[GVRM.save] splatBoneIndices length: ${gvrm.gs.splatBoneIndices?.length || 0} (first 10: [${(gvrm.gs.splatBoneIndices || []).slice(0, 10).join(', ')}])`);
+
     const extraData = {
       modelScale: modelScale,
       boneOperations: boneOperations,
@@ -225,29 +306,51 @@ export class GVRM extends THREE.Group {
       fileName = gsPath.split('/').pop() + '.gvrm';
     }
 
-    _downloadBlob(content, fileName);
+    await _downloadBlob(content, fileName);
 
     if (savePly) {
       console.log('savePly!');
       const plyBlob = new Blob([plyBuffer], { type: 'application/octet-stream' });
       const plyFileName = fileName.replace('.gvrm', '_processed.ply');
-      _downloadBlob(plyBlob, plyFileName);
+      await _downloadBlob(plyBlob, plyFileName);
     }
 
-    function _downloadBlob(blob, fileName) {
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = fileName;
-      a.click();
-      if (blob === content && gvrm.url) {  // GVRM
-        URL.revokeObjectURL(gvrm.url);
-      }
-      if (blob === content) {  // GVRM
-        gvrm.url = url;
-      }
-       else {  // PLY
-        URL.revokeObjectURL(url);
+    async function _downloadBlob(blob, fileName) {
+      // Check if we're in Node.js environment
+      if (typeof process !== 'undefined' && process.versions && process.versions.node) {
+        // Node.js mode: Write file to disk
+        console.log(`[CLI Mode] Writing file to disk: ${fileName}`);
+
+        // Convert blob to buffer
+        const arrayBuffer = await blob.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
+
+        // Import fs dynamically
+        const fs = await import('fs');
+        fs.default.writeFileSync(fileName, buffer);
+
+        console.log(`[CLI Mode] ✓ File written successfully: ${fileName} (${(buffer.length / 1024 / 1024).toFixed(2)} MB)`);
+
+        // Store a mock URL for compatibility
+        if (blob === content) {  // GVRM
+          gvrm.url = `file://${fileName}`;
+        }
+      } else {
+        // Browser mode: Use download mechanism
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = fileName;
+        a.click();
+        if (blob === content && gvrm.url) {  // GVRM
+          URL.revokeObjectURL(gvrm.url);
+        }
+        if (blob === content) {  // GVRM
+          gvrm.url = url;
+        }
+        else {  // PLY
+          URL.revokeObjectURL(url);
+        }
       }
     }
   }
@@ -332,6 +435,11 @@ export class GVRM extends THREE.Group {
         tempMidPoint.addVectors(tempNodePos, tempChildPos).multiplyScalar(0.5);
         tempMidPoint.sub(this.character.currentVrm.scene.position).add(this.character.currentVrm.scene.position0);
         tempMidPoint.applyQuaternion(this.gs.viewer.quaternion.clone().invert());
+
+        // Initialize matrixWorld0 if not present
+        if (!childBone.matrixWorld0) {
+          childBone.matrixWorld0 = childBone.matrixWorld.clone();
+        }
 
         tempMat.extractRotation(childBone.matrixWorld.multiply(childBone.matrixWorld0.clone().invert()));
         tempQuat.setFromRotationMatrix(tempMat);

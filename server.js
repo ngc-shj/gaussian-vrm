@@ -9,9 +9,10 @@
 // npm install -g express
 // node server.js &
 
-const https = require('https');
-const fs = require('fs');
-const express = require('express');
+import https from 'https';
+import fs from 'fs';
+import express from 'express';
+
 const app = express();
 
 const options = {
@@ -21,4 +22,6 @@ const options = {
 
 app.use(express.static('./'));
 
-https.createServer(options, app).listen(8080);
+https.createServer(options, app).listen(8080, () => {
+  console.log('gaussian-vrm server running on https://localhost:8080');
+});

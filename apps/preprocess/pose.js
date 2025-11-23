@@ -4,6 +4,14 @@
 
 import * as THREE from 'three';
 
+// MediaPipe is only available in Node.js CLI mode
+// In browser mode, pose detection is disabled
+let poseDetection = null;
+if (typeof process !== 'undefined' && process.versions && process.versions.node) {
+  // Dynamically import in Node.js environment only
+  poseDetection = await import('@mediapipe/tasks-vision');
+}
+
 
 const MODEL_SCORE_THRESHOLD = 0.01;
 const AXIS_SIZE = 0.02;
@@ -137,6 +145,13 @@ export class PoseDetector {
   }
 
   async init() {
+    // Skip pose detection in browser mode (MediaPipe not available)
+    if (!poseDetection) {
+      console.log('[PoseDetector] Skipped - MediaPipe not available in browser mode');
+      this.flagReady = false;
+      return;
+    }
+
     const model = poseDetection.SupportedModels.BlazePose;
     const detectorConfig = {
       runtime: 'tfjs',

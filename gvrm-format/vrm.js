@@ -7,6 +7,16 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 
+// Conditional import for Node.js fs module and VRM loader
+let fs = null;
+let VRMLoaderNode = null;
+if (typeof process !== 'undefined' && process.versions && process.versions.node) {
+  fs = await import('fs');
+  // Import Node.js VRM loader (texture-less)
+  const vrmLoaderModule = await import('../vrm-loader-node.js');
+  VRMLoaderNode = vrmLoaderModule.VRMLoaderNode;
+}
+
 
 export class VRMCharacter {
     constructor(scene, modelUrl = null, animationUrl = null, scale = 1.0, center = false) {
@@ -45,27 +55,58 @@ export class VRMCharacter {
                 parser, { helperRoot: helperRoot, autoUpdateHumanBones: true });
         });
 
-        this.loadingPromise = new Promise((resolve, reject) => {
-            loader.load(
-                this.modelUrl,
+        this.loadingPromise = new Promise(async (resolve, reject) => {
+            try {
+                let gltf;
 
-                async (gltf) => {
-                    const vrm = gltf.userData.vrm;
-
-					// calling these functions greatly improves the performance
-					VRMUtils.removeUnnecessaryVertices( gltf.scene );
-					VRMUtils.removeUnnecessaryJoints( gltf.scene );
-
-                    this.currentVrm = vrm;
-
-                    vrm.scene.traverse((obj) => {
-                        obj.frustumCulled = false;
+                // Check if we're in Node.js environment
+                if (VRMLoaderNode) {
+                    // Node.js path: Use custom texture-less VRM loader
+                    console.log(`[VRM Node.js] Using texture-less VRM loader for: ${this.modelUrl}`);
+                    const vrmLoader = new VRMLoaderNode();
+                    gltf = await vrmLoader.loadVRM(this.modelUrl, this.scene, this.scale);
+                    console.log(`[VRM Node.js] ✓ VRM loaded (skeleton only)`);
+                } else {
+                    // Browser path: Use standard GLTF loader
+                    gltf = await new Promise((resolveLoad, rejectLoad) => {
+                        loader.load(
+                            this.modelUrl,
+                            resolveLoad,
+                            (progress) => {
+                                let progressLoaded = parseFloat(
+                                    (100.0 * (progress.loaded / progress.total)).toPrecision(3));
+                                const loaddisplay = document.getElementById('loaddisplay');
+                                if (loaddisplay) {
+                                    loaddisplay.innerHTML = progressLoaded + '%';
+                                }
+                            },
+                            rejectLoad
+                        );
                     });
+                }
 
-                    // don't add to vrm.scene for rotation0
-                    // this.scene.add(helperRoot);
+                // Common processing after loading
+                const vrm = gltf.userData.vrm;
 
-                    // calc bbox before scale for vrm.meta?.metaVersion==0
+                // calling these functions greatly improves the performance
+                // (skip in Node.js mode as we don't have mesh geometry)
+                if (!VRMLoaderNode) {
+                    VRMUtils.removeUnnecessaryVertices( gltf.scene );
+                    VRMUtils.removeUnnecessaryJoints( gltf.scene );
+                }
+
+                this.currentVrm = vrm;
+
+                vrm.scene.traverse((obj) => {
+                    obj.frustumCulled = false;
+                });
+
+                // don't add to vrm.scene for rotation0
+                // this.scene.add(helperRoot);
+
+                // calc bbox before scale for vrm.meta?.metaVersion==0
+                // (skip in Node.js mode as we don't have mesh geometry)
+                if (!VRMLoaderNode) {
                     const bbsize = new THREE.Vector3();
                     const box = new THREE.Box3().setFromObject(vrm.scene);
                     box.getSize(bbsize);
@@ -73,22 +114,26 @@ export class VRMCharacter {
                     // const helper = new THREE.Box3Helper( box, 0xffff00 );
                     // vrm.scene.add( helper );
                     this.ground = - bbsize.y * 0.5 * this.scale;
+                } else {
+                    // Default ground for skeleton-only mode
+                    this.ground = -1.0 * this.scale;
+                }
 
-                    if (this.animationUrl && this.animationUrl !== '') {
-                        await this.loadFBX(this.animationUrl);
-                    }
+                if (this.animationUrl && this.animationUrl !== '') {
+                    await this.loadFBX(this.animationUrl);
+                }
 
-                    // move after loadFBX
-                    vrm.scene.position.y += this.ground;
+                // move after loadFBX
+                vrm.scene.position.y += this.ground;
 
-                    vrm.scene.scale.setScalar(this.scale);
+                vrm.scene.scale.setScalar(this.scale);
 
-                    // scale joints
+                // scale joints and colliders (skip in Node.js skeleton-only mode)
+                if (!VRMLoaderNode && vrm.springBoneManager) {
                     for (const joint of vrm.springBoneManager.joints) {
                         joint.settings.stiffness *= this.scale;
                         joint.settings.hitRadius *= this.scale;
                     }
-                    // scale colliders
                     for (const collider of vrm.springBoneManager.colliders) {
                         const shape = collider.shape;
                         shape.radius *= this.scale;
@@ -96,29 +141,23 @@ export class VRMCharacter {
                             shape.tail.multiplyScalar(this.scale);
                         }
                     }
+                }
 
-                    // rotate if the VRM is VRM0.0
-                    VRMUtils.rotateVRM0(vrm);
-                    vrm.scene.updateMatrix();
-                    vrm.scene.position0 = vrm.scene.position.clone();
-                    vrm.scene.rotation0 = vrm.scene.rotation.clone();
-                    vrm.scene.quaternion0 = vrm.scene.quaternion.clone();
-                    vrm.scene.matrix0 = vrm.scene.matrix.clone();
-                    vrm.hipPos0 = vrm.humanoid.getNormalizedBoneNode('hips').position.clone();
+                // rotate if the VRM is VRM0.0
+                VRMUtils.rotateVRM0(vrm);
+                vrm.scene.updateMatrix();
+                vrm.scene.position0 = vrm.scene.position.clone();
+                vrm.scene.rotation0 = vrm.scene.rotation.clone();
+                vrm.scene.quaternion0 = vrm.scene.quaternion.clone();
+                vrm.scene.matrix0 = vrm.scene.matrix.clone();
+                vrm.hipPos0 = vrm.humanoid.getNormalizedBoneNode('hips').position.clone();
 
-                    this._isLoading = false;
-                    resolve(gltf);
-                },
-                (progress) => {
-                    let progressLoaded = parseFloat(
-                        (100.0 * (progress.loaded / progress.total)).toPrecision(3));
-                    const loaddisplay = document.getElementById('loaddisplay');
-                    if (loaddisplay) {
-                        loaddisplay.innerHTML = progressLoaded + '%';
-                    }
-                },
-                (error) => reject(error),
-            );
+                this._isLoading = false;
+                resolve(gltf);
+            } catch (error) {
+                console.error('[VRM] Load error:', error);
+                reject(error);
+            }
         });
     }
 
